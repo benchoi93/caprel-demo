@@ -71,6 +71,17 @@
     </div>
   </div>
 
+  <div class="panel">
+    <h3>Is P(mode) ∝ R? Sampled distribution vs reward-proportional target</h3>
+    <canvas id="barCanvas" width="480" height="240"></canvas>
+    <div class="legend">
+      Each cluster of three bars is one mode. Gray = target (R<sub>i</sub>/Σ R<sub>j</sub>);
+      blue = standard's empirical fraction; red = CapRel's. The closer blue/red
+      are to gray, the better the sampler matches P ∝ R. Fractions are
+      computed among mode-terminating trajectories.
+    </div>
+  </div>
+
   <div class="panel controls">
     <h3>Controls</h3>
     <label>λ (penalty weight): <span class="val" id="lamVal">25.0</span>
@@ -340,6 +351,104 @@ function render(canvasId, state) {
   }
 }
 
+function renderBars() {
+  const cvs = document.getElementById('barCanvas');
+  const ctx = cvs.getContext('2d');
+  const W = cvs.width, Hc = cvs.height;
+  const pad = { l: 38, r: 10, t: 22, b: 50 };
+  const plotW = W - pad.l - pad.r;
+  const plotH = Hc - pad.t - pad.b;
+
+  ctx.clearRect(0, 0, W, Hc);
+  ctx.fillStyle = '#fff'; ctx.fillRect(pad.l, pad.t, plotW, plotH);
+  ctx.strokeStyle = '#ccc'; ctx.strokeRect(pad.l, pad.t, plotW, plotH);
+
+  if (!REWARD) return;
+  const modes = REWARD.modes;
+  const Rsum = modes.reduce((s, m) => s + m.r, 0);
+
+  function countAtMode(state, m) {
+    return state.trajectories.filter(
+      tr => tr.terminal[0] === m.x && tr.terminal[1] === m.y).length;
+  }
+  function modeFrac(state, m) {
+    const modeTerms = state.trajectories.filter(tr => isMode(tr.terminal[0], tr.terminal[1])).length;
+    return modeTerms > 0 ? countAtMode(state, m) / modeTerms : 0;
+  }
+
+  // Find max y for scaling
+  let ymax = 0.01;
+  for (const m of modes) {
+    const t = m.r / Rsum;
+    const s = modeFrac(stateStd, m);
+    const c = modeFrac(stateCng, m);
+    ymax = Math.max(ymax, t, s, c);
+  }
+  ymax = Math.min(1, ymax * 1.15);
+
+  // y-axis ticks
+  ctx.fillStyle = '#666'; ctx.font = '10px monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const frac = i / 4;
+    const yv = frac * ymax;
+    const py = pad.t + plotH - frac * plotH;
+    ctx.strokeStyle = i === 0 ? '#999' : '#eee';
+    ctx.beginPath(); ctx.moveTo(pad.l, py); ctx.lineTo(pad.l + plotW, py); ctx.stroke();
+    ctx.fillText(yv.toFixed(2), pad.l - 4, py);
+  }
+
+  // Bars
+  const nModes = modes.length;
+  const groupW = plotW / nModes;
+  const barW = groupW / 4;     // 3 bars + spacing
+  const colors = {
+    target: 'rgba(130,130,130,0.9)',
+    std:    'rgba(30, 90, 200, 0.85)',
+    cng:    'rgba(200, 40, 80, 0.85)',
+  };
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let i = 0; i < nModes; i++) {
+    const m = modes[i];
+    const cx = pad.l + (i + 0.5) * groupW;
+    const vals = [
+      { v: m.r / Rsum, color: colors.target },
+      { v: modeFrac(stateStd, m), color: colors.std },
+      { v: modeFrac(stateCng, m), color: colors.cng },
+    ];
+    for (let j = 0; j < 3; j++) {
+      const bx = cx + (j - 1) * barW;
+      const h = (vals[j].v / ymax) * plotH;
+      const by = pad.t + plotH - h;
+      ctx.fillStyle = vals[j].color;
+      ctx.fillRect(bx - barW * 0.42, by, barW * 0.84, h);
+    }
+    // x-axis label: mode coords + reward
+    ctx.fillStyle = '#333';
+    ctx.font = '10px monospace';
+    ctx.fillText(`(${m.x},${m.y})`, cx, pad.t + plotH + 4);
+    ctx.fillText(`R=${m.r}`, cx, pad.t + plotH + 18);
+  }
+
+  // Legend
+  const legendY = 4;
+  const legendItems = [
+    { label: 'target R/Z', color: colors.target },
+    { label: 'standard',   color: colors.std },
+    { label: 'CapRel',     color: colors.cng },
+  ];
+  let lx = pad.l;
+  ctx.font = '11px monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  for (const item of legendItems) {
+    ctx.fillStyle = item.color;
+    ctx.fillRect(lx, legendY + 3, 12, 10);
+    ctx.fillStyle = '#222';
+    ctx.fillText(item.label, lx + 16, legendY + 2);
+    lx += 6 + ctx.measureText(item.label).width + 20;
+  }
+}
+
 function renderChart() {
   const cvs = document.getElementById('chartCanvas');
   const ctx = cvs.getContext('2d');
@@ -436,6 +545,7 @@ function stepBatch() {
   render('stdCanvas', stateStd);
   render('cngCanvas', stateCng);
   renderChart();
+  renderBars();
   const meanR = s => (s.trajectories.length ? s.sumReward / s.trajectories.length : 0);
   $('stdStats').textContent =
     `trajectories: ${stateStd.trajectories.length}\n` +
