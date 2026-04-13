@@ -104,9 +104,9 @@ function basePolicy(x, y, temp) {
 
   const scores = cands.map(c => {
     if (c.a === 'stop') {
-      // Prefer stopping at modes
-      const dm = Math.min(...MODES.map(m => Math.hypot(m[0] - x, m[1] - y)));
-      return -dm * 0.5;   // lower distance → more likely to stop
+      // Stop is only attractive when standing on a mode; strongly
+      // penalize stopping anywhere else so trajectories travel.
+      return isMode(x, y) ? 0 : -8;
     }
     const dm = Math.min(...MODES.map(m => Math.hypot(m[0] - c.nx, m[1] - c.ny)));
     return -dm;
