@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Congestion-Aware GFlowNet Sampling — Interactive Demo</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         margin: 0; padding: 20px; background: #fafafa; color: #222; }
+  h1 { margin: 0 0 4px; font-size: 20px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 16px; }
+  .panels { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .panel { background: white; border: 1px solid #ddd; border-radius: 6px;
+           padding: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .panel h3 { margin: 0 0 8px; font-size: 14px; }
+  .panel canvas { display: block; border: 1px solid #eee; }
+  .legend { font-size: 12px; color: #555; margin-top: 6px; }
+  .controls { display: flex; flex-direction: column; gap: 10px; min-width: 220px; }
+  .controls label { font-size: 12px; color: #333; display: flex; flex-direction: column; gap: 2px; }
+  .controls input[type=range] { width: 100%; }
+  .controls .val { font-family: monospace; color: #06c; }
+  .controls button { padding: 6px 10px; font-size: 13px; cursor: pointer; border: 1px solid #bbb;
+                     background: #f5f5f5; border-radius: 4px; }
+  .controls button:hover { background: #eaeaea; }
+  .stats { font-family: monospace; font-size: 12px; white-space: pre; }
+  .footer { color: #888; font-size: 11px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<h1>Congestion-Aware GFlowNet Sampling</h1>
+<div class="sub">
+  2D HyperGrid (10×10) with 4 corner modes. Standard vs capacity-relative sampling, side-by-side.
+  Paper 3: <em>Congestion-Aware Inference-Time Sampling for Frozen GFlowNets</em>.
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <h3>Standard sampling (policy only)</h3>
+    <canvas id="stdCanvas" width="320" height="320"></canvas>
+    <div class="legend">Heatmap: visit count. Yellow stars = modes.</div>
+    <div class="stats" id="stdStats">–</div>
+  </div>
+
+  <div class="panel">
+    <h3>Capacity-relative sampling (CapRel, <code>λ·max(0, (c/(n·p))<sup>β</sup>−1)</code>)</h3>
+    <canvas id="cngCanvas" width="320" height="320"></canvas>
+    <div class="legend">Penalty fires when visits exceed the capacity baseline <code>n·p_base</code>.</div>
+    <div class="stats" id="cngStats">–</div>
+  </div>
+
+  <div class="panel controls">
+    <h3>Controls</h3>
+    <label>λ (penalty weight): <span class="val" id="lamVal">5.0</span>
+      <input type="range" id="lam" min="0" max="20" step="0.5" value="5.0">
+    </label>
+    <label>t (threshold): <span class="val" id="thrVal">1.0</span>
+      <input type="range" id="thr" min="0.0" max="3.0" step="0.1" value="1.0">
+    </label>
+    <label>β (BPR exponent): <span class="val" id="betaVal">2.0</span>
+      <input type="range" id="beta" min="1" max="4" step="0.5" value="2.0">
+    </label>
+    <label>Batch size per step: <span class="val" id="batchVal">20</span>
+      <input type="range" id="batch" min="1" max="100" step="1" value="20">
+    </label>
+    <label>Base-policy temperature: <span class="val" id="tempVal">0.8</span>
+      <input type="range" id="temp" min="0.2" max="2.0" step="0.1" value="0.8">
+    </label>
+    <button id="btnStep">Step (one batch)</button>
+    <button id="btnPlay">▶ Play</button>
+    <button id="btnReset">Reset both</button>
+    <div class="stats" id="globalStats">total: 0 trajectories</div>
+    <div class="legend" style="margin-top:8px">
+      The base policy is a soft-greedy toward the nearest corner (proxy for a trained GFN).
+      CapRel adds a state-visit-count penalty that reallocates probability from over-visited
+      children to under-visited siblings.
+    </div>
+  </div>
+</div>
+
+<div class="footer">
+  Implementation: single HTML file, ~250 LoC of vanilla JS. All sampling runs client-side.
+  MDP: 10×10 grid, actions = {up, right, stop}, trajectory ends on stop or at boundary.
+</div>
+
+<script>
+// --- HyperGrid 2D MDP --------------------------------------------------------
+const H = 10;                                   // grid height
+const MODES = [[0, H-1], [H-1, 0], [H-1, H-1], [5, 5]]; // 4 modes (3 corners + center for visual richness)
+const ACTIONS = [[0, 1], [1, 0]];               // up, right (stop handled separately)
+
+function isMode(x, y) {
+  return MODES.some(m => m[0] === x && m[1] === y);
+}
+
+// Base policy: soft-greedy toward nearest mode.
+// P(action) ∝ exp(β_temp * (-distance_to_nearest_mode_after_action)).
+// Also allows "stop" action with probability tied to being at/near a mode.
+function basePolicy(x, y, temp) {
+  const children = [];
+  // up, right, stop
+  const cands = [];
+  if (y + 1 < H) cands.push({a: 'up', nx: x, ny: y + 1});
+  if (x + 1 < H) cands.push({a: 'right', nx: x + 1, ny: y});
+  cands.push({a: 'stop', nx: x, ny: y});
+
+  const scores = cands.map(c => {
+    if (c.a === 'stop') {
+      // Prefer stopping at modes
+      const dm = Math.min(...MODES.map(m => Math.hypot(m[0] - x, m[1] - y)));
+      return -dm * 0.5;   // lower distance → more likely to stop
+    }
+    const dm = Math.min(...MODES.map(m => Math.hypot(m[0] - c.nx, m[1] - c.ny)));
+    return -dm;
+  });
+  const expScores = scores.map(s => Math.exp(s / temp));
+  const sum = expScores.reduce((a, b) => a + b, 0);
+  const probs = expScores.map(e => e / sum);
+  return { cands, probs };
+}
+
+function sampleIdx(probs, rng) {
+  const r = rng();
+  let acc = 0;
+  for (let i = 0; i < probs.length; i++) {
+    acc += probs[i];
+    if (r < acc) return i;
+  }
+  return probs.length - 1;
+}
+
+// Mulberry32 PRNG — reproducible seeds if needed
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return () => {
+    t = (t + 0x6D2B79F5) >>> 0;
+    let r = t;
+    r = Math.imul(r ^ (r >>> 15), r | 1);
+    r ^= r + Math.imul(r ^ (r >>> 7), r | 61);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// --- Sampler states ---------------------------------------------------------
+// We keep per-state visit counts (for each child-of-parent slot) to compute
+// the capacity-relative penalty.
+function freshState() {
+  return {
+    visits: new Uint32Array(H * H),           // total visits to each cell
+    parentChildVisits: new Map(),             // key "x,y→nx,ny" → count
+    parentVisits: new Map(),                  // key "x,y" → total count
+    trajectories: [],                          // array of {path, reward, terminal}
+    modesFound: new Set(),
+  };
+}
+
+function idx(x, y) { return y * H + x; }
+
+// Run ONE trajectory in-place, updating state.
+// If useCng, apply CapRel penalty to child logits.
+function sampleOne(state, rng, useCng, lam, thr, bpr_beta, temp) {
+  let x = 0, y = 0;
+  const path = [[x, y]];
+  state.visits[idx(x, y)]++;
+  const parentKey = (x, y) => `${x},${y}`;
+
+  while (true) {
+    const { cands, probs } = basePolicy(x, y, temp);
+
+    // Capacity-relative penalty: child action 'a' from parent (x,y).
+    // Penalty[i] = λ · max(0, (c_i / (n * p_i))^β − t^β · 0)
+    // Simpler: penalty = λ · max(0, (ratio − t))^β, ratio = c/(n*p)
+    // Here we use the formula φ = λ · max(0, ratio^β − 1)  (threshold via t=1)
+    // and subtract from logit.
+    let adjProbs = probs.slice();
+    if (useCng) {
+      const n = state.parentVisits.get(parentKey(x, y)) || 0;
+      if (n > 0) {
+        const logits = adjProbs.map(p => Math.log(p + 1e-12));
+        for (let i = 0; i < cands.length; i++) {
+          const c = cands[i];
+          const childKey = `${parentKey(x, y)}→${c.nx},${c.ny},${c.a}`;
+          const ci = state.parentChildVisits.get(childKey) || 0;
+          if (probs[i] > 0 && ci > 0) {
+            const ratio = ci / (n * probs[i]);
+            // φ = λ · max(0, ratio^β − t^β)
+            const phi = lam * Math.max(0, Math.pow(ratio, bpr_beta) - Math.pow(thr, bpr_beta));
+            logits[i] -= phi;
+          }
+        }
+        const m = Math.max(...logits);
+        const exps = logits.map(l => Math.exp(l - m));
+        const s = exps.reduce((a, b) => a + b, 0);
+        adjProbs = exps.map(e => e / s);
+      }
+    }
+
+    const i = sampleIdx(adjProbs, rng);
+    const c = cands[i];
+    const pk = parentKey(x, y);
+    state.parentVisits.set(pk, (state.parentVisits.get(pk) || 0) + 1);
+    const ck = `${pk}→${c.nx},${c.ny},${c.a}`;
+    state.parentChildVisits.set(ck, (state.parentChildVisits.get(ck) || 0) + 1);
+
+    if (c.a === 'stop') break;
+    x = c.nx; y = c.ny;
+    path.push([x, y]);
+    state.visits[idx(x, y)]++;
+  }
+
+  const reward = isMode(x, y) ? 1 : 0;
+  if (reward > 0) state.modesFound.add(`${x},${y}`);
+  state.trajectories.push({ path, reward, terminal: [x, y] });
+}
+
+// --- Rendering --------------------------------------------------------------
+function render(canvasId, state) {
+  const cvs = document.getElementById(canvasId);
+  const ctx = cvs.getContext('2d');
+  const cell = cvs.width / H;
+  let maxV = 1;
+  for (let i = 0; i < state.visits.length; i++) if (state.visits[i] > maxV) maxV = state.visits[i];
+
+  ctx.clearRect(0, 0, cvs.width, cvs.height);
+  // Heatmap
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < H; x++) {
+      const v = state.visits[idx(x, y)];
+      const a = v > 0 ? 0.15 + 0.85 * Math.pow(v / maxV, 0.6) : 0;
+      ctx.fillStyle = `rgba(30, 90, 200, ${a.toFixed(3)})`;
+      // Note canvas y is inverted from grid y
+      ctx.fillRect(x * cell, (H - 1 - y) * cell, cell, cell);
+    }
+  }
+  // Grid lines
+  ctx.strokeStyle = '#eee';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= H; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * cell, 0); ctx.lineTo(i * cell, cvs.height); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, i * cell); ctx.lineTo(cvs.width, i * cell); ctx.stroke();
+  }
+  // Modes (yellow stars)
+  for (const [mx, my] of MODES) {
+    const cx = (mx + 0.5) * cell;
+    const cy = (H - 1 - my + 0.5) * cell;
+    ctx.fillStyle = state.modesFound.has(`${mx},${my}`) ? '#f2c015' : '#f2c01540';
+    ctx.strokeStyle = '#b08800';
+    ctx.beginPath();
+    for (let k = 0; k < 10; k++) {
+      const ang = -Math.PI / 2 + k * Math.PI / 5;
+      const r = k % 2 === 0 ? cell * 0.35 : cell * 0.16;
+      const px = cx + Math.cos(ang) * r;
+      const py = cy + Math.sin(ang) * r;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  }
+  // Last few trajectories (trace)
+  const N = Math.min(5, state.trajectories.length);
+  for (let t = state.trajectories.length - N; t < state.trajectories.length; t++) {
+    if (t < 0) continue;
+    const tr = state.trajectories[t];
+    ctx.strokeStyle = 'rgba(200, 40, 80, 0.45)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let k = 0; k < tr.path.length; k++) {
+      const [px, py] = tr.path[k];
+      const cx = (px + 0.5) * cell;
+      const cy = (H - 1 - py + 0.5) * cell;
+      if (k === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+    }
+    ctx.stroke();
+  }
+}
+
+// --- UI Wiring --------------------------------------------------------------
+let stateStd = freshState();
+let stateCng = freshState();
+const rngStd = mulberry32(1);
+const rngCng = mulberry32(1);
+
+const $ = id => document.getElementById(id);
+const lam = $('lam'), thr = $('thr'), beta = $('beta'), batch = $('batch'), temp = $('temp');
+const lamVal = $('lamVal'), thrVal = $('thrVal'), betaVal = $('betaVal'),
+      batchVal = $('batchVal'), tempVal = $('tempVal');
+
+for (const s of [lam, thr, beta, batch, temp]) {
+  s.addEventListener('input', () => {
+    lamVal.textContent  = (+lam.value).toFixed(1);
+    thrVal.textContent  = (+thr.value).toFixed(1);
+    betaVal.textContent = (+beta.value).toFixed(1);
+    batchVal.textContent= batch.value;
+    tempVal.textContent = (+temp.value).toFixed(1);
+  });
+}
+
+function stepBatch() {
+  const n = +batch.value;
+  const p = {
+    lam: +lam.value, thr: +thr.value, bpr_beta: +beta.value, temp: +temp.value,
+  };
+  for (let i = 0; i < n; i++) {
+    sampleOne(stateStd, rngStd, false, p.lam, p.thr, p.bpr_beta, p.temp);
+    sampleOne(stateCng, rngCng, true,  p.lam, p.thr, p.bpr_beta, p.temp);
+  }
+  render('stdCanvas', stateStd);
+  render('cngCanvas', stateCng);
+  const statS = `trajectories: ${stateStd.trajectories.length}
+modes found:  ${stateStd.modesFound.size}/${MODES.length}
+reward rate:  ${(stateStd.trajectories.filter(t => t.reward > 0).length
+                 / Math.max(1, stateStd.trajectories.length)).toFixed(3)}`;
+  const statC = `trajectories: ${stateCng.trajectories.length}
+modes found:  ${stateCng.modesFound.size}/${MODES.length}
+reward rate:  ${(stateCng.trajectories.filter(t => t.reward > 0).length
+                 / Math.max(1, stateCng.trajectories.length)).toFixed(3)}`;
+  $('stdStats').textContent = statS;
+  $('cngStats').textContent = statC;
+  $('globalStats').textContent = `total: ${stateStd.trajectories.length} trajectories per side`;
+}
+
+$('btnStep').addEventListener('click', stepBatch);
+
+let playing = false, playHandle = null;
+$('btnPlay').addEventListener('click', () => {
+  playing = !playing;
+  $('btnPlay').textContent = playing ? '⏸ Pause' : '▶ Play';
+  if (playing) {
+    playHandle = setInterval(stepBatch, 150);
+  } else {
+    clearInterval(playHandle);
+  }
+});
+
+$('btnReset').addEventListener('click', () => {
+  stateStd = freshState();
+  stateCng = freshState();
+  render('stdCanvas', stateStd);
+  render('cngCanvas', stateCng);
+  stepBatch(); // draw initial
+  $('stdStats').textContent = '–';
+  $('cngStats').textContent = '–';
+});
+
+// Initial render
+render('stdCanvas', stateStd);
+render('cngCanvas', stateCng);
+</script>
+</body>
+</html>
