@@ -13,8 +13,8 @@
            padding: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
   .panel h3 { margin: 0 0 8px; font-size: 14px; }
   .panel canvas { display: block; border: 1px solid #eee; }
-  .legend { font-size: 12px; color: #555; margin-top: 6px; }
-  .controls { display: flex; flex-direction: column; gap: 10px; min-width: 220px; }
+  .legend { font-size: 12px; color: #555; margin-top: 6px; max-width: 360px; }
+  .controls { display: flex; flex-direction: column; gap: 10px; min-width: 230px; }
   .controls label { font-size: 12px; color: #333; display: flex; flex-direction: column; gap: 2px; }
   .controls input[type=range] { width: 100%; }
   .controls .val { font-family: monospace; color: #06c; }
@@ -22,35 +22,47 @@
                      background: #f5f5f5; border-radius: 4px; }
   .controls button:hover { background: #eaeaea; }
   .stats { font-family: monospace; font-size: 12px; white-space: pre; }
-  .footer { color: #888; font-size: 11px; margin-top: 24px; }
+  .footer { color: #888; font-size: 11px; margin-top: 24px; max-width: 920px; line-height: 1.5; }
+  #status { color: #c60; font-weight: bold; padding: 8px; }
 </style>
 </head>
 <body>
-<h1>Congestion-Aware GFlowNet Sampling</h1>
+<h1>Congestion-Aware GFlowNet Sampling — Real Trained TB-GFN</h1>
 <div class="sub">
-  2D HyperGrid (10×10) with 4 corner modes. Standard vs capacity-relative sampling, side-by-side.
-  Paper 3: <em>Congestion-Aware Inference-Time Sampling for Frozen GFlowNets</em>.
+  2D 16×16 HyperGrid with <em>asymmetric</em> reward (one R=10 corner, four
+  R=1.0–1.5 modes). Side-by-side: standard sampling vs. capacity-relative
+  (CapRel) sampling. Forward pass uses the actual MLP weights from a TB-GFN
+  trained for 4,000 steps in PyTorch. Companion to Paper 3.
 </div>
+
+<div id="status">Loading trained policy…</div>
 
 <div class="panels">
   <div class="panel">
     <h3>Standard sampling (policy only)</h3>
-    <canvas id="stdCanvas" width="320" height="320"></canvas>
-    <div class="legend">Heatmap: visit count. Yellow stars = modes.</div>
+    <canvas id="stdCanvas" width="384" height="384"></canvas>
+    <div class="legend">
+      Heatmap = visit counts. Star size ∝ reward; star outline filled when discovered.
+      The trained policy collapses onto the dominant R=10 corner.
+    </div>
     <div class="stats" id="stdStats">–</div>
   </div>
 
   <div class="panel">
-    <h3>Capacity-relative sampling (CapRel, <code>λ·max(0, (c/(n·p))<sup>β</sup>−1)</code>)</h3>
-    <canvas id="cngCanvas" width="320" height="320"></canvas>
-    <div class="legend">Penalty fires when visits exceed the capacity baseline <code>n·p_base</code>.</div>
+    <h3>Capacity-relative sampling (CapRel)</h3>
+    <canvas id="cngCanvas" width="384" height="384"></canvas>
+    <div class="legend">
+      Penalty: φ = λ · max(0, (c/(n·p))<sup>β</sup> − t<sup>β</sup>). When the
+      empirical visit ratio of a child action exceeds threshold t, probability
+      is reallocated to under-visited siblings.
+    </div>
     <div class="stats" id="cngStats">–</div>
   </div>
 
   <div class="panel controls">
     <h3>Controls</h3>
-    <label>λ (penalty weight): <span class="val" id="lamVal">5.0</span>
-      <input type="range" id="lam" min="0" max="20" step="0.5" value="5.0">
+    <label>λ (penalty weight): <span class="val" id="lamVal">25.0</span>
+      <input type="range" id="lam" min="0" max="60" step="0.5" value="25.0">
     </label>
     <label>t (threshold): <span class="val" id="thrVal">1.0</span>
       <input type="range" id="thr" min="0.0" max="3.0" step="0.1" value="1.0">
@@ -61,73 +73,98 @@
     <label>Batch size per step: <span class="val" id="batchVal">20</span>
       <input type="range" id="batch" min="1" max="100" step="1" value="20">
     </label>
-    <label>Base-policy temperature: <span class="val" id="tempVal">0.8</span>
-      <input type="range" id="temp" min="0.2" max="2.0" step="0.1" value="0.8">
-    </label>
     <button id="btnStep">Step (one batch)</button>
     <button id="btnPlay">▶ Play</button>
     <button id="btnReset">Reset both</button>
-    <div class="stats" id="globalStats">total: 0 trajectories</div>
+    <div class="stats" id="globalStats">total: 0 trajectories per side</div>
     <div class="legend" style="margin-top:8px">
-      The base policy is a soft-greedy toward the nearest corner (proxy for a trained GFN).
-      CapRel adds a state-visit-count penalty that reallocates probability from over-visited
-      children to under-visited siblings.
+      The MDP has two actions per non-terminal state: increment x, increment y,
+      or stop. Trajectory ends on stop or at the upper-right boundary.
+      Reward is the value at the terminal state.
     </div>
   </div>
 </div>
 
 <div class="footer">
-  Implementation: single HTML file, ~250 LoC of vanilla JS. All sampling runs client-side.
-  MDP: 10×10 grid, actions = {up, right, stop}, trajectory ends on stop or at boundary.
+  Implementation: single HTML file, vanilla JS + Canvas. Forward MLP inference
+  is hand-rolled (no Tensorflow.js dependency) — ~10 KB of weights, ~20 ms
+  per trajectory. Source: <a href="https://github.com/benchoi93/caprel-demo">github.com/benchoi93/caprel-demo</a>.
 </div>
 
 <script>
-// --- HyperGrid 2D MDP --------------------------------------------------------
-const H = 10;                                   // grid height
-const MODES = [[0, H-1], [H-1, 0], [H-1, H-1], [5, 5]]; // 4 modes (3 corners + center for visual richness)
-const ACTIONS = [[0, 1], [1, 0]];               // up, right (stop handled separately)
+// ============================================================================
+// Tiny tensor library: 1D vector ops
+// ============================================================================
+function matmul(W, x) {     // W: [out][in], x: [in] → [out]
+  const out = new Array(W.length);
+  for (let i = 0; i < W.length; i++) {
+    let s = 0;
+    const Wi = W[i];
+    for (let j = 0; j < x.length; j++) s += Wi[j] * x[j];
+    out[i] = s;
+  }
+  return out;
+}
+function vadd(a, b) { return a.map((v, i) => v + b[i]); }
+function leakyRelu(a, slope) { return a.map(v => v >= 0 ? v : v * slope); }
+function softmax(a) {
+  const m = Math.max(...a);
+  const exps = a.map(v => Math.exp(v - m));
+  const s = exps.reduce((p, q) => p + q, 0);
+  return exps.map(e => e / s);
+}
+
+function forward(state_xy, modelLayers, H) {
+  // Normalize state to [0,1] like the python trainer.
+  const Hn = Math.max(H - 1, 1);
+  let h = [state_xy[0] / Hn, state_xy[1] / Hn];
+  for (const L of modelLayers) {
+    if (L.type === 'linear') h = vadd(matmul(L.W, h), L.b);
+    else if (L.type === 'leaky_relu') h = leakyRelu(h, L.slope);
+  }
+  return h;  // raw logits over n_actions (last action = stop)
+}
+
+// ============================================================================
+// MDP wrapper
+// ============================================================================
+let MODEL = null;     // { state_dim, n_actions, height, ndim, layers }
+let REWARD = null;    // { H, modes:[{x,y,r}], reward_grid:[H][H] }
+let H = 16;
+const ACT_STOP_IDX = () => MODEL.n_actions - 1;
+
+function getMask(x, y) {
+  // Same convention as python: ndim=2, increment dims, then stop.
+  const m = new Array(MODEL.n_actions).fill(0);
+  if (x + 1 < H) m[0] = 1;          // increment x
+  if (y + 1 < H) m[1] = 1;          // increment y
+  m[MODEL.n_actions - 1] = 1;       // stop always valid
+  return m;
+}
 
 function isMode(x, y) {
-  return MODES.some(m => m[0] === x && m[1] === y);
+  return REWARD.modes.some(m => m.x === x && m.y === y);
 }
 
-// Base policy: soft-greedy toward nearest mode.
-// P(action) ∝ exp(β_temp * (-distance_to_nearest_mode_after_action)).
-// Also allows "stop" action with probability tied to being at/near a mode.
-function basePolicy(x, y, temp) {
-  const children = [];
-  // up, right, stop
-  const cands = [];
-  if (y + 1 < H) cands.push({a: 'up', nx: x, ny: y + 1});
-  if (x + 1 < H) cands.push({a: 'right', nx: x + 1, ny: y});
-  cands.push({a: 'stop', nx: x, ny: y});
+function rewardOf(x, y) { return REWARD.reward_grid[x][y]; }
 
-  const scores = cands.map(c => {
-    if (c.a === 'stop') {
-      // Stop is only attractive when standing on a mode; strongly
-      // penalize stopping anywhere else so trajectories travel.
-      return isMode(x, y) ? 0 : -8;
-    }
-    const dm = Math.min(...MODES.map(m => Math.hypot(m[0] - c.nx, m[1] - c.ny)));
-    return -dm;
-  });
-  const expScores = scores.map(s => Math.exp(s / temp));
-  const sum = expScores.reduce((a, b) => a + b, 0);
-  const probs = expScores.map(e => e / sum);
-  return { cands, probs };
+// ============================================================================
+// Sampler
+// ============================================================================
+function freshState() {
+  return {
+    visits: new Uint32Array(H * H),
+    parentVisits: new Map(),
+    parentChildVisits: new Map(),
+    trajectories: [],
+    modesFound: new Set(),
+    sumReward: 0,
+  };
 }
+function idx(x, y) { return y * H + x; }
+function pkey(x, y) { return `${x},${y}`; }
+function ckey(x, y, ax, ay, a) { return `${x},${y}→${ax},${ay},${a}`; }
 
-function sampleIdx(probs, rng) {
-  const r = rng();
-  let acc = 0;
-  for (let i = 0; i < probs.length; i++) {
-    acc += probs[i];
-    if (r < acc) return i;
-  }
-  return probs.length - 1;
-}
-
-// Mulberry32 PRNG — reproducible seeds if needed
 function mulberry32(seed) {
   let t = seed >>> 0;
   return () => {
@@ -139,79 +176,78 @@ function mulberry32(seed) {
   };
 }
 
-// --- Sampler states ---------------------------------------------------------
-// We keep per-state visit counts (for each child-of-parent slot) to compute
-// the capacity-relative penalty.
-function freshState() {
-  return {
-    visits: new Uint32Array(H * H),           // total visits to each cell
-    parentChildVisits: new Map(),             // key "x,y→nx,ny" → count
-    parentVisits: new Map(),                  // key "x,y" → total count
-    trajectories: [],                          // array of {path, reward, terminal}
-    modesFound: new Set(),
-  };
+function sampleIdx(probs, rng) {
+  const r = rng(); let acc = 0;
+  for (let i = 0; i < probs.length; i++) { acc += probs[i]; if (r < acc) return i; }
+  return probs.length - 1;
 }
 
-function idx(x, y) { return y * H + x; }
-
-// Run ONE trajectory in-place, updating state.
-// If useCng, apply CapRel penalty to child logits.
-function sampleOne(state, rng, useCng, lam, thr, bpr_beta, temp) {
+// One trajectory; if useCng, apply CapRel penalty per-state.
+function sampleOne(state, rng, useCng, lam, thr, bpr_beta) {
   let x = 0, y = 0;
   const path = [[x, y]];
   state.visits[idx(x, y)]++;
-  const parentKey = (x, y) => `${x},${y}`;
 
   while (true) {
-    const { cands, probs } = basePolicy(x, y, temp);
+    const mask = getMask(x, y);
+    const rawLogits = forward([x, y], MODEL.layers, H);
+    // Mask invalid actions to -inf, then softmax → base policy.
+    const masked = rawLogits.map((l, i) => mask[i] === 1 ? l : -1e9);
+    const baseProbs = softmax(masked);
 
-    // Capacity-relative penalty: child action 'a' from parent (x,y).
-    // Penalty[i] = λ · max(0, (c_i / (n * p_i))^β − t^β · 0)
-    // Simpler: penalty = λ · max(0, (ratio − t))^β, ratio = c/(n*p)
-    // Here we use the formula φ = λ · max(0, ratio^β − 1)  (threshold via t=1)
-    // and subtract from logit.
-    let adjProbs = probs.slice();
+    let logits = rawLogits.slice();
+    for (let i = 0; i < logits.length; i++) if (mask[i] === 0) logits[i] = -1e9;
+
     if (useCng) {
-      const n = state.parentVisits.get(parentKey(x, y)) || 0;
+      const pk = pkey(x, y);
+      const n = state.parentVisits.get(pk) || 0;
       if (n > 0) {
-        const logits = adjProbs.map(p => Math.log(p + 1e-12));
-        for (let i = 0; i < cands.length; i++) {
-          const c = cands[i];
-          const childKey = `${parentKey(x, y)}→${c.nx},${c.ny},${c.a}`;
-          const ci = state.parentChildVisits.get(childKey) || 0;
-          if (probs[i] > 0 && ci > 0) {
-            const ratio = ci / (n * probs[i]);
-            // φ = λ · max(0, ratio^β − t^β)
+        for (let i = 0; i < logits.length; i++) {
+          if (mask[i] === 0) continue;
+          const a = i;
+          // Compute child coords for (a in {0:x+1, 1:y+1, last:stop})
+          const isStop = (a === MODEL.n_actions - 1);
+          const nx = isStop ? x : (a === 0 ? x + 1 : x);
+          const ny = isStop ? y : (a === 1 ? y + 1 : y);
+          const ck = ckey(x, y, nx, ny, isStop ? 'stop' : (a === 0 ? 'x' : 'y'));
+          const ci = state.parentChildVisits.get(ck) || 0;
+          const pi = baseProbs[i];
+          if (ci > 0 && pi > 1e-9) {
+            const ratio = ci / (n * pi);
             const phi = lam * Math.max(0, Math.pow(ratio, bpr_beta) - Math.pow(thr, bpr_beta));
             logits[i] -= phi;
           }
         }
-        const m = Math.max(...logits);
-        const exps = logits.map(l => Math.exp(l - m));
-        const s = exps.reduce((a, b) => a + b, 0);
-        adjProbs = exps.map(e => e / s);
       }
     }
-
+    const adjProbs = softmax(logits);
     const i = sampleIdx(adjProbs, rng);
-    const c = cands[i];
-    const pk = parentKey(x, y);
+
+    // Bookkeeping
+    const pk = pkey(x, y);
     state.parentVisits.set(pk, (state.parentVisits.get(pk) || 0) + 1);
-    const ck = `${pk}→${c.nx},${c.ny},${c.a}`;
+    const isStop = (i === MODEL.n_actions - 1);
+    const nx = isStop ? x : (i === 0 ? x + 1 : x);
+    const ny = isStop ? y : (i === 1 ? y + 1 : y);
+    const ck = ckey(x, y, nx, ny, isStop ? 'stop' : (i === 0 ? 'x' : 'y'));
     state.parentChildVisits.set(ck, (state.parentChildVisits.get(ck) || 0) + 1);
 
-    if (c.a === 'stop') break;
-    x = c.nx; y = c.ny;
-    path.push([x, y]);
+    if (isStop) break;
+    // Forced stop at upper-right corner: only stop is valid in
+    // a 1-action mask, which the policy already handles.
+    x = nx; y = ny; path.push([x, y]);
     state.visits[idx(x, y)]++;
   }
 
-  const reward = isMode(x, y) ? 1 : 0;
-  if (reward > 0) state.modesFound.add(`${x},${y}`);
-  state.trajectories.push({ path, reward, terminal: [x, y] });
+  const r = rewardOf(x, y);
+  if (isMode(x, y)) state.modesFound.add(`${x},${y}`);
+  state.sumReward += r;
+  state.trajectories.push({ path, terminal: [x, y], reward: r });
 }
 
-// --- Rendering --------------------------------------------------------------
+// ============================================================================
+// Rendering
+// ============================================================================
 function render(canvasId, state) {
   const cvs = document.getElementById(canvasId);
   const ctx = cvs.getContext('2d');
@@ -224,39 +260,39 @@ function render(canvasId, state) {
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < H; x++) {
       const v = state.visits[idx(x, y)];
-      const a = v > 0 ? 0.15 + 0.85 * Math.pow(v / maxV, 0.6) : 0;
+      const a = v > 0 ? 0.10 + 0.85 * Math.pow(v / maxV, 0.6) : 0;
       ctx.fillStyle = `rgba(30, 90, 200, ${a.toFixed(3)})`;
-      // Note canvas y is inverted from grid y
       ctx.fillRect(x * cell, (H - 1 - y) * cell, cell, cell);
     }
   }
   // Grid lines
-  ctx.strokeStyle = '#eee';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#eee'; ctx.lineWidth = 1;
   for (let i = 0; i <= H; i++) {
-    ctx.beginPath();
-    ctx.moveTo(i * cell, 0); ctx.lineTo(i * cell, cvs.height); ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(0, i * cell); ctx.lineTo(cvs.width, i * cell); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i * cell, 0); ctx.lineTo(i * cell, cvs.height); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i * cell); ctx.lineTo(cvs.width, i * cell); ctx.stroke();
   }
-  // Modes (yellow stars)
-  for (const [mx, my] of MODES) {
-    const cx = (mx + 0.5) * cell;
-    const cy = (H - 1 - my + 0.5) * cell;
-    ctx.fillStyle = state.modesFound.has(`${mx},${my}`) ? '#f2c015' : '#f2c01540';
+  // Modes (size ∝ reward)
+  const maxR = Math.max(...REWARD.modes.map(m => m.r));
+  for (const m of REWARD.modes) {
+    const cx = (m.x + 0.5) * cell;
+    const cy = (H - 1 - m.y + 0.5) * cell;
+    const sz = cell * (0.18 + 0.22 * m.r / maxR);
+    ctx.fillStyle = state.modesFound.has(`${m.x},${m.y}`) ? '#f2c015' : '#f2c01540';
     ctx.strokeStyle = '#b08800';
     ctx.beginPath();
     for (let k = 0; k < 10; k++) {
       const ang = -Math.PI / 2 + k * Math.PI / 5;
-      const r = k % 2 === 0 ? cell * 0.35 : cell * 0.16;
+      const r = k % 2 === 0 ? sz : sz * 0.45;
       const px = cx + Math.cos(ang) * r;
       const py = cy + Math.sin(ang) * r;
       if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     }
-    ctx.closePath();
-    ctx.fill(); ctx.stroke();
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Label reward
+    ctx.fillStyle = '#444'; ctx.font = '10px monospace';
+    ctx.fillText(`R=${m.r}`, cx + sz + 2, cy + 3);
   }
-  // Last few trajectories (trace)
+  // Last few trajectories
   const N = Math.min(5, state.trajectories.length);
   for (let t = state.trajectories.length - N; t < state.trajectories.length; t++) {
     if (t < 0) continue;
@@ -274,77 +310,79 @@ function render(canvasId, state) {
   }
 }
 
-// --- UI Wiring --------------------------------------------------------------
-let stateStd = freshState();
-let stateCng = freshState();
-const rngStd = mulberry32(1);
-const rngCng = mulberry32(1);
-
+// ============================================================================
+// UI wiring
+// ============================================================================
+let stateStd, stateCng;
+let rngStd, rngCng;
 const $ = id => document.getElementById(id);
-const lam = $('lam'), thr = $('thr'), beta = $('beta'), batch = $('batch'), temp = $('temp');
-const lamVal = $('lamVal'), thrVal = $('thrVal'), betaVal = $('betaVal'),
-      batchVal = $('batchVal'), tempVal = $('tempVal');
 
-for (const s of [lam, thr, beta, batch, temp]) {
-  s.addEventListener('input', () => {
-    lamVal.textContent  = (+lam.value).toFixed(1);
-    thrVal.textContent  = (+thr.value).toFixed(1);
-    betaVal.textContent = (+beta.value).toFixed(1);
-    batchVal.textContent= batch.value;
-    tempVal.textContent = (+temp.value).toFixed(1);
-  });
+function freshAll() {
+  stateStd = freshState();
+  stateCng = freshState();
+  rngStd = mulberry32(1);
+  rngCng = mulberry32(1);
 }
 
 function stepBatch() {
-  const n = +batch.value;
-  const p = {
-    lam: +lam.value, thr: +thr.value, bpr_beta: +beta.value, temp: +temp.value,
-  };
+  if (!MODEL || !REWARD) return;
+  const n = +$('batch').value;
+  const p = { lam: +$('lam').value, thr: +$('thr').value, bpr_beta: +$('beta').value };
   for (let i = 0; i < n; i++) {
-    sampleOne(stateStd, rngStd, false, p.lam, p.thr, p.bpr_beta, p.temp);
-    sampleOne(stateCng, rngCng, true,  p.lam, p.thr, p.bpr_beta, p.temp);
+    sampleOne(stateStd, rngStd, false, p.lam, p.thr, p.bpr_beta);
+    sampleOne(stateCng, rngCng, true,  p.lam, p.thr, p.bpr_beta);
   }
   render('stdCanvas', stateStd);
   render('cngCanvas', stateCng);
-  const statS = `trajectories: ${stateStd.trajectories.length}
-modes found:  ${stateStd.modesFound.size}/${MODES.length}
-reward rate:  ${(stateStd.trajectories.filter(t => t.reward > 0).length
-                 / Math.max(1, stateStd.trajectories.length)).toFixed(3)}`;
-  const statC = `trajectories: ${stateCng.trajectories.length}
-modes found:  ${stateCng.modesFound.size}/${MODES.length}
-reward rate:  ${(stateCng.trajectories.filter(t => t.reward > 0).length
-                 / Math.max(1, stateCng.trajectories.length)).toFixed(3)}`;
-  $('stdStats').textContent = statS;
-  $('cngStats').textContent = statC;
+  const meanR = s => (s.trajectories.length ? s.sumReward / s.trajectories.length : 0);
+  $('stdStats').textContent =
+    `trajectories: ${stateStd.trajectories.length}\n` +
+    `modes found:  ${stateStd.modesFound.size}/${REWARD.modes.length}\n` +
+    `mean reward:  ${meanR(stateStd).toFixed(3)}`;
+  $('cngStats').textContent =
+    `trajectories: ${stateCng.trajectories.length}\n` +
+    `modes found:  ${stateCng.modesFound.size}/${REWARD.modes.length}\n` +
+    `mean reward:  ${meanR(stateCng).toFixed(3)}`;
   $('globalStats').textContent = `total: ${stateStd.trajectories.length} trajectories per side`;
 }
 
+async function loadModel() {
+  try {
+    const [model, reward] = await Promise.all([
+      fetch('trained_policy.json').then(r => r.json()),
+      fetch('reward_map.json').then(r => r.json()),
+    ]);
+    MODEL = model; REWARD = reward; H = MODEL.height;
+    $('status').textContent = `Model loaded: ${MODEL.layers.length} layers, ${REWARD.modes.length} modes on ${H}×${H} grid.`;
+    $('status').style.color = '#080';
+    freshAll();
+    stepBatch();
+  } catch (e) {
+    $('status').innerHTML = `<b>Error loading model:</b> ${e.message}.<br>` +
+      `Make sure <code>trained_policy.json</code> and <code>reward_map.json</code> ` +
+      `are next to this HTML file. If you opened the file directly via file://, ` +
+      `most browsers block fetch — serve via <code>python -m http.server</code>.`;
+  }
+}
+
+for (const k of ['lam','thr','beta','batch']) {
+  $(k).addEventListener('input', () => {
+    $(`${k}Val`).textContent = (+$(k).value).toFixed(k === 'batch' ? 0 : 1);
+  });
+}
 $('btnStep').addEventListener('click', stepBatch);
 
 let playing = false, playHandle = null;
 $('btnPlay').addEventListener('click', () => {
   playing = !playing;
   $('btnPlay').textContent = playing ? '⏸ Pause' : '▶ Play';
-  if (playing) {
-    playHandle = setInterval(stepBatch, 150);
-  } else {
-    clearInterval(playHandle);
-  }
+  if (playing) playHandle = setInterval(stepBatch, 150);
+  else clearInterval(playHandle);
 });
 
-$('btnReset').addEventListener('click', () => {
-  stateStd = freshState();
-  stateCng = freshState();
-  render('stdCanvas', stateStd);
-  render('cngCanvas', stateCng);
-  stepBatch(); // draw initial
-  $('stdStats').textContent = '–';
-  $('cngStats').textContent = '–';
-});
+$('btnReset').addEventListener('click', () => { freshAll(); stepBatch(); });
 
-// Initial render
-render('stdCanvas', stateStd);
-render('cngCanvas', stateCng);
+loadModel();
 </script>
 </body>
 </html>
