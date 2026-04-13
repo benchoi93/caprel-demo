@@ -61,6 +61,16 @@
     <div class="stats" id="cngStats">–</div>
   </div>
 
+  <div class="panel">
+    <h3>Modes discovered over time</h3>
+    <canvas id="chartCanvas" width="480" height="240"></canvas>
+    <div class="legend">
+      x-axis = trajectories drawn; y-axis = unique modes found (out of 5).
+      Red line = CapRel, blue line = standard. CapRel should climb faster
+      and reach higher plateau; standard typically plateaus at 1–2 modes.
+    </div>
+  </div>
+
   <div class="panel controls">
     <h3>Controls</h3>
     <label>λ (penalty weight): <span class="val" id="lamVal">25.0</span>
@@ -161,6 +171,8 @@ function freshState() {
     trajectories: [],
     modesFound: new Set(),
     sumReward: 0,
+    // Per-trajectory history: after each trajectory, record current modes_found count.
+    modesHistory: [],
   };
 }
 function idx(x, y) { return y * H + x; }
@@ -245,6 +257,7 @@ function sampleOne(state, rng, useCng, lam, thr, bpr_beta) {
   if (isMode(x, y)) state.modesFound.add(`${x},${y}`);
   state.sumReward += r;
   state.trajectories.push({ path, terminal: [x, y], reward: r });
+  state.modesHistory.push(state.modesFound.size);
 }
 
 // ============================================================================
@@ -327,6 +340,77 @@ function render(canvasId, state) {
   }
 }
 
+function renderChart() {
+  const cvs = document.getElementById('chartCanvas');
+  const ctx = cvs.getContext('2d');
+  const W = cvs.width, Hc = cvs.height;
+  const pad = { l: 34, r: 10, t: 12, b: 22 };
+  const plotW = W - pad.l - pad.r;
+  const plotH = Hc - pad.t - pad.b;
+
+  ctx.clearRect(0, 0, W, Hc);
+  ctx.fillStyle = '#fff'; ctx.fillRect(pad.l, pad.t, plotW, plotH);
+  ctx.strokeStyle = '#ccc'; ctx.lineWidth = 1;
+  ctx.strokeRect(pad.l, pad.t, plotW, plotH);
+
+  const totalModes = REWARD ? REWARD.modes.length : 5;
+  const nTraj = Math.max(stateStd.modesHistory.length, stateCng.modesHistory.length, 1);
+  const xMax = nTraj;
+  const yMax = totalModes;
+
+  // Grid lines + labels
+  ctx.fillStyle = '#666'; ctx.font = '10px monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let y = 0; y <= yMax; y++) {
+    const py = pad.t + plotH - (y / yMax) * plotH;
+    ctx.strokeStyle = y === 0 ? '#999' : '#eee';
+    ctx.beginPath(); ctx.moveTo(pad.l, py); ctx.lineTo(pad.l + plotW, py); ctx.stroke();
+    ctx.fillText(String(y), pad.l - 4, py);
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const xTicks = 5;
+  for (let i = 0; i <= xTicks; i++) {
+    const frac = i / xTicks;
+    const px = pad.l + frac * plotW;
+    const xv = Math.round(frac * xMax);
+    ctx.fillText(String(xv), px, pad.t + plotH + 4);
+  }
+  // Axis labels
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#444';
+  ctx.fillText('trajectories', pad.l, Hc - 10);
+  ctx.save();
+  ctx.translate(8, pad.t + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.fillText('modes', 0, 0);
+  ctx.restore();
+
+  function drawLine(history, color) {
+    if (history.length < 1) return;
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < history.length; i++) {
+      const px = pad.l + (i + 1) / xMax * plotW;
+      const py = pad.t + plotH - (history[i] / yMax) * plotH;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  drawLine(stateStd.modesHistory, 'rgba(30, 90, 200, 0.85)');   // blue = standard
+  drawLine(stateCng.modesHistory, 'rgba(200, 40, 80, 0.85)');   // red  = CapRel
+
+  // Legend
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(30, 90, 200, 0.9)';
+  ctx.fillRect(pad.l + 8, pad.t + 8, 18, 2);
+  ctx.fillStyle = '#222'; ctx.fillText('standard', pad.l + 30, pad.t + 3);
+  ctx.fillStyle = 'rgba(200, 40, 80, 0.9)';
+  ctx.fillRect(pad.l + 90, pad.t + 8, 18, 2);
+  ctx.fillStyle = '#222'; ctx.fillText('CapRel', pad.l + 112, pad.t + 3);
+}
+
 // ============================================================================
 // UI wiring
 // ============================================================================
@@ -351,6 +435,7 @@ function stepBatch() {
   }
   render('stdCanvas', stateStd);
   render('cngCanvas', stateCng);
+  renderChart();
   const meanR = s => (s.trajectories.length ? s.sumReward / s.trajectories.length : 0);
   $('stdStats').textContent =
     `trajectories: ${stateStd.trajectories.length}\n` +
